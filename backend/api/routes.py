@@ -1,65 +1,71 @@
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
-from fastapi.responses import Response, FileResponse
-from schemas.translation import TranslationResponse, ExportPDFRequest
+from fastapi.responses import FileResponse
+from schemas.translation import TranslationResponse
 from services.ai_service_adapter import AIServiceAdapter
 import tempfile
 import shutil
 import os
+import uuid
 
 router = APIRouter()
 ai_service = AIServiceAdapter()
+
+# In-memory store: download_id -> file path on disk
+_pdf_store: dict[str, str] = {}
+
 
 @router.post("/translate", response_model=TranslationResponse)
 async def translate_document(
     file: UploadFile = File(...),
     source_lang: str = Form("English"),
-    target_lang: str = Form("Hindi")
+    target_lang: str = Form("Hindi"),
 ):
-    if not file.filename.endswith('.pdf'):
+    if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
-        
+
     try:
-        # Save the uploaded file to a temporary directory so the pipeline can read it
+        # Save uploaded file to a temp directory the pipeline can read from
         temp_dir = tempfile.mkdtemp()
         pdf_path = os.path.join(temp_dir, file.filename)
-        
+
         with open(pdf_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-            
-        # Define output directory for the pipeline
+
+        # Output directory for pipeline artifacts
         output_dir = os.path.join(temp_dir, "output")
-        
+
         # Execute the AI pipeline
         result = ai_service.process_document(file_path=pdf_path, output_dir=output_dir)
-        
-        # Returning the parsed clauses for the UI ResultViewer
+
+        # Store generated PDF path for later download
+        download_id = None
+        generated_pdf = result.get("pdf_path")
+        if generated_pdf and os.path.exists(str(generated_pdf)):
+            download_id = str(uuid.uuid4())
+            _pdf_store[download_id] = str(generated_pdf)
+
         return TranslationResponse(
             clauses=result.get("clauses", []),
-            status="completed"
+            status="completed",
+            pdf_download_id=download_id,
         )
-        
+
     except Exception as e:
         print(f"Error during translation: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/export/pdf")
-async def export_pdf(request: ExportPDFRequest):
-    """
-    For the MVP, since the pipeline already generates a PDF internally on the Desktop/temp dir,
-    we can use our existing HTML-to-PDF service as a fallback if needed, or you can later 
-    wire this to fetch the actual pipeline-generated PDF.
-    """
-    from services.pdf_render_service import PDFRenderService
-    try:
-        pdf_bytes = PDFRenderService.render_to_pdf(request.clauses, request.title)
-        return Response(
-            content=pdf_bytes,
-            media_type="application/pdf",
-            headers={
-                "Content-Disposition": f"attachment; filename=translated_document.pdf"
-            }
-        )
-    except Exception as e:
-        print(f"Error generating PDF: {e}")
-        raise HTTPException(status_code=500, detail="Failed to generate PDF")
+@router.get("/download/{download_id}")
+async def download_pdf(download_id: str):
+    """Serve the pipeline-generated translated PDF for download."""
+    pdf_path = _pdf_store.get(download_id)
+    if not pdf_path or not os.path.exists(pdf_path):
+        raise HTTPException(status_code=404, detail="PDF not found or expired")
+
+    return FileResponse(
+        path=pdf_path,
+        media_type="application/pdf",
+        filename="translated_document.pdf",
+    )

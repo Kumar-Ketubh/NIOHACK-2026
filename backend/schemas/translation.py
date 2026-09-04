@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 
 class ClausePair(BaseModel):
     id: str
@@ -10,6 +10,7 @@ class ClausePair(BaseModel):
 class TranslationResponse(BaseModel):
     clauses: List[ClausePair]
     status: str
+    pdf_download_id: Optional[str] = None
 
 class ExportPDFRequest(BaseModel):
     clauses: List[ClausePair]
